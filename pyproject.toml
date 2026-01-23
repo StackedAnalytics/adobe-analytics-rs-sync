@@ -1,0 +1,9 @@
+[project]
+name = "adobe-analytics-rs-sync"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "aanalytics2>=0.4.4.post1",
+]

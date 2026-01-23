@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.log
+
+# Virtual environments
+.venv
+
+# Report suite backups
+backup_*.json
+
+# Secrets
+config_analytics_oauth.json
