@@ -9,35 +9,80 @@ Usage:
     python test_connection.py
 
 Prerequisites:
-    1. pip install aanalytics2
-    2. Create config_analytics_oauth.json with your credentials
+    1. pip install aanalytics2 python-dotenv
+    2. Create .env file with your credentials (see .env.example)
+       OR create config_analytics_oauth.json
 """
 
 import aanalytics2 as api2
 import json
+import os
 from pathlib import Path
+
+# Load environment variables from .env file (if it exists)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
+def get_oauth_from_env():
+    """Check if OAuth credentials are set in environment variables"""
+    org_id = os.getenv("AA_ORG_ID", "")
+    client_id = os.getenv("AA_CLIENT_ID", "")
+    client_secret = os.getenv("AA_CLIENT_SECRET", "")
+    scopes = os.getenv(
+        "AA_SCOPES",
+        "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
+    )
+    
+    if org_id and client_id and client_secret:
+        return {
+            "org_id": org_id,
+            "client_id": client_id,
+            "secret": client_secret,
+            "scopes": scopes
+        }
+    return None
 
 
 def create_config_if_missing():
-    """Create a sample config file if it doesn't exist"""
-    config_file = "config_analytics_oauth.json"
+    """Create a sample config file if no configuration exists"""
+    config_file = os.getenv("AA_CONFIG_FILE", "config_analytics_oauth.json")
     
-    if not Path(config_file).exists():
-        config = {
-            "org_id": "DUMMY_ORG_ID@AdobeOrg",
-            "client_id": "dummy_client_id_abc123xyz789",
-            "secret": "dummy_client_secret_p@ssw0rd123!secret",
-            "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
-        }
-        
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-        
-        print(f"✗ Config file created: {config_file}")
-        print("  Please update it with your real credentials and run again.")
-        return None
+    # First check if env vars are set
+    env_config = get_oauth_from_env()
+    if env_config:
+        # Write temp config for aanalytics2
+        temp_file = ".aa_config_from_env.json"
+        with open(temp_file, 'w') as f:
+            json.dump(env_config, f, indent=2)
+        return temp_file, True  # Return file path and flag indicating env vars used
     
-    return config_file
+    # Check for existing config file
+    if Path(config_file).exists():
+        return config_file, False
+    
+    # Create sample config
+    config = {
+        "org_id": "DUMMY_ORG_ID@AdobeOrg",
+        "client_id": "dummy_client_id_abc123xyz789",
+        "secret": "dummy_client_secret_p@ssw0rd123!secret",
+        "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
+    }
+    
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"✗ No credentials found!")
+    print(f"\n  Option 1: Create a .env file with:")
+    print(f"    AA_ORG_ID=YOUR_ORG_ID@AdobeOrg")
+    print(f"    AA_CLIENT_ID=your_client_id")
+    print(f"    AA_CLIENT_SECRET=your_client_secret")
+    print(f"\n  Option 2: Update the config file created at:")
+    print(f"    {config_file}")
+    return None, False
 
 
 def test_connection():
@@ -48,11 +93,15 @@ def test_connection():
     print("=" * 50)
     
     # Step 1: Check config file
-    print("\n[1] Checking config file...")
-    config_file = create_config_if_missing()
+    print("\n[1] Checking configuration...")
+    config_file, using_env = create_config_if_missing()
     if not config_file:
         return False
-    print(f"    ✓ Found: {config_file}")
+    
+    if using_env:
+        print("    ✓ Using credentials from environment variables")
+    else:
+        print(f"    ✓ Using config file: {config_file}")
     
     # Step 2: Import config (this triggers authentication)
     print("\n[2] Authenticating with Adobe IMS...")
@@ -131,6 +180,26 @@ def test_connection():
         
     except Exception as e:
         print(f"    ⚠ 2.0 API test failed (non-critical): {e}")
+    
+    # Step 7: Show configured report suites from env
+    print("\n[7] Checking report suite configuration...")
+    prod_rsid = os.getenv("AA_PRODUCTION_RSID", "")
+    dev_rsid = os.getenv("AA_DEV_RSID", "")
+    staging_rsid = os.getenv("AA_STAGING_RSID", "")
+    
+    if prod_rsid and dev_rsid:
+        print(f"    ✓ Report suites configured:")
+        print(f"      - Production: {prod_rsid}")
+        print(f"      - Dev:        {dev_rsid}")
+        if staging_rsid:
+            print(f"      - Staging:    {staging_rsid}")
+    else:
+        print(f"    ⚠ Report suite IDs not configured in environment")
+        print(f"      Add to .env: AA_PRODUCTION_RSID, AA_DEV_RSID, AA_STAGING_RSID")
+    
+    # Clean up temp config if we created one
+    if using_env and Path(".aa_config_from_env.json").exists():
+        Path(".aa_config_from_env.json").unlink()
     
     # Success!
     print("\n" + "=" * 50)

@@ -28,22 +28,18 @@ The 2.0 API does not yet support report suite configuration management. The 1.4 
 ## Installation
 
 ```bash
-# Install the aanalytics2 package
-uv sync
-# or
-pip install aanalytics2
+# Install dependencies
+pip install aanalytics2 python-dotenv
 
 # Clone or download the scripts
-# - adobe_analytics_rs_sync.py  (main sync tool)
-# - test_connection.py (test your Adobe API connection without running the utility)
+# - adobe_analytics_rs_sync_aanalytics2.py  (main sync tool)
+# - test_connection.py                       (connection tester)
+# - .env.example                             (environment template)
 ```
 
 ## Quick Start
 
 ### 1. Set Up Adobe Developer Console Credentials
-
-> [!TIP]
-> If you already have a project with the Adobe Analytics API enabled and an OAuth server-to-server credential, skip to step 2
 
 1. Go to [Adobe Developer Console](https://developer.adobe.com/console/)
 2. Create a new project (or use an existing one)
@@ -51,20 +47,30 @@ pip install aanalytics2
 4. Create an **OAuth Server-to-Server** credential
 5. Assign the credential to a product profile with Analytics admin access
 
-### 2. Create Configuration File
+### 2. Create Your `.env` File
 
-Create `config_analytics_oauth.json` in your working directory:
+Copy the example and fill in your values:
 
-```json
-{
-  "org_id": "YOUR_ORG_ID@AdobeOrg",
-  "client_id": "your_client_id",
-  "secret": "your_client_secret",
-  "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
-}
+```bash
+cp .env.example .env
 ```
 
-> 💡 **Tip:** Run `test_connection.py` first — it will create a sample config file for you.
+Edit `.env` with your credentials:
+
+```bash
+# Adobe OAuth Server-to-Server Credentials
+# Get these from Adobe Developer Console
+AA_ORG_ID=YOUR_ORG_ID@AdobeOrg
+AA_CLIENT_ID=your_client_id_here
+AA_CLIENT_SECRET=your_client_secret_here
+
+# Report Suite IDs
+AA_PRODUCTION_RSID=mycompanyprod
+AA_DEV_RSID=mycompanydev
+AA_STAGING_RSID=mycompanystg
+```
+
+> 💡 **That's it!** All configuration is in one place. No need for a separate JSON file.
 
 ### 3. Test Your Connection
 
@@ -102,22 +108,10 @@ CONNECTION TEST PASSED ✓
 ==================================================
 ```
 
-### 4. Configure Report Suites
-
-Edit `main.py` and update the `ReportSuiteConfig` class:
-
-```python
-@dataclass
-class ReportSuiteConfig:
-    production_rsid: str = "mycompanyprod"    # Source of truth
-    dev_rsid: str = "mycompanydev"            # Target
-    staging_rsid: str = "mycompanystg"        # Target
-```
-
-### 5. Run the Sync
+### 4. Run the Sync
 
 ```bash
-python main.py
+python adobe_analytics_rs_sync_aanalytics2.py
 ```
 
 The script will:
@@ -127,18 +121,70 @@ The script will:
 4. ✓ Perform a dry run (shows what would change)
 5. ⏸ Wait for you to uncomment the actual sync
 
-## Usage Examples
+## Configuration
 
-### Dry Run (Preview Changes)
+### Environment Variables
+
+All configuration is done via environment variables (loaded from `.env` file):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AA_ORG_ID` | Yes | Adobe Organization ID (ends with `@AdobeOrg`) |
+| `AA_CLIENT_ID` | Yes | OAuth Client ID from Developer Console |
+| `AA_CLIENT_SECRET` | Yes | OAuth Client Secret from Developer Console |
+| `AA_SCOPES` | No | OAuth scopes (has sensible default) |
+| `AA_PRODUCTION_RSID` | Yes | Source report suite (production) |
+| `AA_DEV_RSID` | Yes | Target report suite (development) |
+| `AA_STAGING_RSID` | No | Target report suite (staging) |
+| `AA_CONFIG_FILE` | No | Path to JSON config (only if not using env vars) |
+
+### Using a `.env` File (Recommended)
+
+1. Copy `.env.example` to `.env`
+2. Fill in your values
+3. Run the script — it loads automatically via `python-dotenv`
+
+```bash
+cp .env.example .env
+# Edit .env with your values
+python test_connection.py
+```
+
+### Alternative: JSON Config File
+
+If you prefer a JSON config file (or can't use `python-dotenv`), create `config_analytics_oauth.json`:
+
+```json
+{
+  "org_id": "YOUR_ORG_ID@AdobeOrg",
+  "client_id": "your_client_id",
+  "secret": "your_client_secret",
+  "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext"
+}
+```
+
+Then set report suite IDs via shell environment variables.
+
+### Passing Values Directly in Code
 
 ```python
-from adobe_analytics_rs_sync import ReportSuiteSynchronizer, ReportSuiteConfig
+from adobe_analytics_rs_sync_aanalytics2 import ReportSuiteSynchronizer, ReportSuiteConfig, OAuthConfig
 
-sync = ReportSuiteSynchronizer("config_analytics_oauth.json", ReportSuiteConfig())
-sync.connect()
+# Override environment variables
+oauth = OAuthConfig(
+    org_id="YOUR_ORG_ID@AdobeOrg",
+    client_id="your_client_id",
+    client_secret="your_secret"
+)
+config_file = oauth.save_to_file("my_config.json")
 
-# See what would be synced without making changes
-results = sync.sync_all(dry_run=True)
+rs_config = ReportSuiteConfig(
+    production_rsid="mycompanyprod",
+    dev_rsid="mycompanydev",
+    staging_rsid="mycompanystg"
+)
+
+sync = ReportSuiteSynchronizer(config_file, rs_config)
 ```
 
 ### Sync Specific Configuration Types
@@ -197,8 +243,10 @@ sync.restore_from_backup(
 ```
 .
 ├── README.md
-├── config_analytics_oauth.json      # Your credentials (do not commit!)
-├── adobe_analytics_rs_sync.py       # Main sync tool
+├── .env.example                     # Environment template (commit this)
+├── .env                             # Your environment config (do NOT commit!)
+├── config_analytics_oauth.json      # Your OAuth credentials (do NOT commit!)
+├── adobe_analytics_rs_sync_aanalytics2.py   # Main sync tool
 ├── test_connection.py               # Connection tester
 └── backup_*.json                    # Auto-generated backups
 ```
@@ -248,14 +296,25 @@ sync.restore_from_backup(
 
 ## Security Notes
 
-⚠️ **Never commit `config_analytics_oauth.json` to version control!**
+⚠️ **Never commit secrets to version control!**
 
 Add to your `.gitignore`:
-```
+```gitignore
+# Credentials and secrets
+.env
 config_analytics_oauth.json
+.aa_config_from_env.json
+
+# Backups may contain sensitive config
 backup_*.json
+
+# Python
 *.log
+__pycache__/
+*.pyc
 ```
+
+The `.env.example` file is safe to commit — it contains only placeholder values.
 
 ## API Documentation
 

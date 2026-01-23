@@ -17,24 +17,38 @@ IMPORTANT NOTES:
 - The 1.4 API will reach EOL on August 12, 2026
 
 Installation:
-    pip install aanalytics2
-    -- or --
-    uv sync
+    pip install aanalytics2 python-dotenv
+
+Configuration:
+    Create a .env file with your report suite IDs:
+    
+        AA_PRODUCTION_RSID=mycompanyprod
+        AA_DEV_RSID=mycompanydev
+        AA_STAGING_RSID=mycompanystg
 
 Documentation:
     https://github.com/pitchmuc/adobe-analytics-api-2.0
 
-Author: Charlie Tysse <charlie@ctysse.net>
-Version: 1.0
+Author: Digital Analytics Consultant
+Version: 2.1
 """
 
 import aanalytics2 as api2
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Load environment variables from .env file (if it exists)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed; will use environment variables directly
+    pass
 
 # Configure logging
 logging.basicConfig(
@@ -49,21 +63,90 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 @dataclass
+class OAuthConfig:
+    """
+    OAuth Server-to-Server credentials.
+    
+    Values are loaded from environment variables with fallback to JSON config file.
+    
+    Environment variables:
+        AA_ORG_ID        - Adobe Organization ID (ends with @AdobeOrg)
+        AA_CLIENT_ID     - OAuth Client ID
+        AA_CLIENT_SECRET - OAuth Client Secret
+        AA_SCOPES        - OAuth Scopes (comma-separated)
+    """
+    org_id: str = None
+    client_id: str = None
+    client_secret: str = None
+    scopes: str = None
+    
+    def __post_init__(self):
+        """Load from environment variables if not provided"""
+        if self.org_id is None:
+            self.org_id = os.getenv("AA_ORG_ID", "")
+        if self.client_id is None:
+            self.client_id = os.getenv("AA_CLIENT_ID", "")
+        if self.client_secret is None:
+            self.client_secret = os.getenv("AA_CLIENT_SECRET", "")
+        if self.scopes is None:
+            self.scopes = os.getenv(
+                "AA_SCOPES",
+                "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
+            )
+    
+    def is_configured(self) -> bool:
+        """Check if all required credentials are set"""
+        return bool(self.org_id and self.client_id and self.client_secret)
+    
+    def to_config_dict(self) -> Dict[str, str]:
+        """Convert to dictionary format expected by aanalytics2"""
+        return {
+            "org_id": self.org_id,
+            "client_id": self.client_id,
+            "secret": self.client_secret,
+            "scopes": self.scopes
+        }
+    
+    def save_to_file(self, filename: str) -> str:
+        """Save credentials to JSON config file (for aanalytics2 compatibility)"""
+        with open(filename, 'w') as f:
+            json.dump(self.to_config_dict(), f, indent=2)
+        return filename
+
+
+@dataclass
 class ReportSuiteConfig:
-    """Report suite identifiers for the sync operation"""
-    # Production report suite (source of truth)
-    production_rsid: str = "dummycompanyprod"
+    """
+    Report suite identifiers for the sync operation.
     
-    # Development report suite (target)
-    dev_rsid: str = "dummycompanydev"
+    Values are loaded from environment variables (or .env file) with fallback defaults.
     
-    # Staging report suite (target)
-    staging_rsid: str = "dummycompanystg"
+    Environment variables:
+        AA_PRODUCTION_RSID  - Production report suite (source of truth)
+        AA_DEV_RSID         - Development report suite (target)
+        AA_STAGING_RSID     - Staging report suite (target)
+    """
+    production_rsid: str = None
+    dev_rsid: str = None
+    staging_rsid: str = None
+    
+    def __post_init__(self):
+        """Load from environment variables if not provided"""
+        if self.production_rsid is None:
+            self.production_rsid = os.getenv("AA_PRODUCTION_RSID", "dummycompanyprod")
+        if self.dev_rsid is None:
+            self.dev_rsid = os.getenv("AA_DEV_RSID", "dummycompanydev")
+        if self.staging_rsid is None:
+            self.staging_rsid = os.getenv("AA_STAGING_RSID", "dummycompanystg")
     
     @property
     def target_rsids(self) -> List[str]:
         """Return list of target report suites"""
         return [self.dev_rsid, self.staging_rsid]
+    
+    def is_using_defaults(self) -> bool:
+        """Check if still using dummy default values"""
+        return "dummy" in self.production_rsid.lower()
 
 
 # =============================================================================
@@ -93,6 +176,38 @@ def create_sample_config_file(filename: str = "config_analytics_oauth.json"):
     logger.info("Please update with your actual Adobe Developer Console credentials")
     
     return filename
+
+
+def get_or_create_config_file(oauth_config: OAuthConfig, default_filename: str = "config_analytics_oauth.json") -> str:
+    """
+    Get config file path, creating from environment variables if needed.
+    
+    Priority:
+    1. If env vars are set (AA_ORG_ID, AA_CLIENT_ID, AA_CLIENT_SECRET), use those
+    2. If AA_CONFIG_FILE env var points to existing file, use that
+    3. If default config file exists, use that
+    4. Create sample config file
+    
+    Returns:
+        Path to config file
+    """
+    config_file = os.getenv("AA_CONFIG_FILE", default_filename)
+    
+    # If OAuth credentials are in environment, create a temp config file
+    if oauth_config.is_configured():
+        logger.info("Using OAuth credentials from environment variables")
+        # Write to a temp file that aanalytics2 can read
+        temp_config = ".aa_config_from_env.json"
+        oauth_config.save_to_file(temp_config)
+        return temp_config
+    
+    # Otherwise, check for existing config file
+    if Path(config_file).exists():
+        logger.info(f"Using config file: {config_file}")
+        return config_file
+    
+    # No config found - return None to signal we need to create one
+    return None
 
 
 # =============================================================================
@@ -803,27 +918,46 @@ def main():
     print("Using aanalytics2 package")
     print("=" * 60)
     
-    # Step 1: Check/create config file
-    config_file = "config_analytics_oauth.json"
+    # Step 1: Load OAuth credentials (from env vars or config file)
+    oauth_config = OAuthConfig()
+    config_file = get_or_create_config_file(oauth_config)
     
-    if not Path(config_file).exists():
-        print(f"\nConfig file not found. Creating sample: {config_file}")
-        create_sample_config_file(config_file)
-        print("\n⚠️  Please update the config file with your actual credentials")
-        print("   Then re-run this script.")
+    if config_file is None:
+        print("\n⚠️  No OAuth credentials found!")
+        print("\n   Option 1: Set environment variables (recommended)")
+        print("   -------------------------------------------------")
+        print("   Create a .env file with:")
+        print("     AA_ORG_ID=YOUR_ORG_ID@AdobeOrg")
+        print("     AA_CLIENT_ID=your_client_id")
+        print("     AA_CLIENT_SECRET=your_client_secret")
+        print("     AA_PRODUCTION_RSID=your_prod_rsid")
+        print("     AA_DEV_RSID=your_dev_rsid")
+        print("     AA_STAGING_RSID=your_staging_rsid")
+        print("\n   Option 2: Use a JSON config file")
+        print("   ---------------------------------")
+        sample_file = "config_analytics_oauth.json"
+        create_sample_config_file(sample_file)
+        print(f"   Sample created: {sample_file}")
+        print("   Update it with your credentials and re-run.")
         return
     
-    # Step 2: Initialize report suite configuration
-    rs_config = ReportSuiteConfig(
-        production_rsid="dummycompanyprod",
-        dev_rsid="dummycompanydev",
-        staging_rsid="dummycompanystg"
-    )
+    # Step 2: Initialize report suite configuration (reads from env vars)
+    rs_config = ReportSuiteConfig()
     
-    print(f"\nReport Suite Configuration:")
+    print(f"\nConfiguration:")
+    print(f"  OAuth: {'Environment variables' if oauth_config.is_configured() else 'Config file'}")
     print(f"  Source (Production): {rs_config.production_rsid}")
     print(f"  Target (Dev):        {rs_config.dev_rsid}")
     print(f"  Target (Staging):    {rs_config.staging_rsid}")
+    
+    # Warn if using default dummy values
+    if rs_config.is_using_defaults():
+        print("\n⚠️  WARNING: Using default dummy report suite IDs!")
+        print("   Add to your .env file:")
+        print("     AA_PRODUCTION_RSID=your_prod_rsid")
+        print("     AA_DEV_RSID=your_dev_rsid")
+        print("     AA_STAGING_RSID=your_staging_rsid")
+        return
     
     # Step 3: Create synchronizer and connect
     synchronizer = ReportSuiteSynchronizer(config_file, rs_config)
@@ -878,6 +1012,11 @@ def main():
     print("  3. ✓ Compared production vs dev configurations")
     print("  4. ✓ Performed dry run sync")
     print("  5. ⏸ Actual sync ready (uncomment to execute)")
+    
+    # Clean up temp config file if we created one
+    temp_config = ".aa_config_from_env.json"
+    if Path(temp_config).exists() and oauth_config.is_configured():
+        Path(temp_config).unlink()
 
 
 if __name__ == "__main__":
