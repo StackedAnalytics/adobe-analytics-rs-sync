@@ -17,6 +17,8 @@ IMPORTANT NOTES:
 - The 1.4 API will reach EOL on August 12, 2026
 
 Installation:
+    pip install aanalytics2
+    -- or --
     uv sync
 
 Documentation:

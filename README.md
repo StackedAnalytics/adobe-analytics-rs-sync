@@ -29,16 +29,21 @@ The 2.0 API does not yet support report suite configuration management. The 1.4 
 
 ```bash
 # Install the aanalytics2 package
+uv sync
+# or
 pip install aanalytics2
 
 # Clone or download the scripts
-# - adobe_analytics_rs_sync_aanalytics2.py  (main sync tool)
-# - test_connection.py                       (connection tester)
+# - adobe_analytics_rs_sync.py  (main sync tool)
+# - test_connection.py (test your Adobe API connection without running the utility)
 ```
 
 ## Quick Start
 
 ### 1. Set Up Adobe Developer Console Credentials
+
+> [!TIP]
+> If you already have a project with the Adobe Analytics API enabled and an OAuth server-to-server credential, skip to step 2
 
 1. Go to [Adobe Developer Console](https://developer.adobe.com/console/)
 2. Create a new project (or use an existing one)
@@ -99,7 +104,7 @@ CONNECTION TEST PASSED ✓
 
 ### 4. Configure Report Suites
 
-Edit `adobe_analytics_rs_sync_aanalytics2.py` and update the `ReportSuiteConfig` class:
+Edit `main.py` and update the `ReportSuiteConfig` class:
 
 ```python
 @dataclass
@@ -112,7 +117,7 @@ class ReportSuiteConfig:
 ### 5. Run the Sync
 
 ```bash
-python adobe_analytics_rs_sync_aanalytics2.py
+python main.py
 ```
 
 The script will:
@@ -127,7 +132,7 @@ The script will:
 ### Dry Run (Preview Changes)
 
 ```python
-from adobe_analytics_rs_sync_aanalytics2 import ReportSuiteSynchronizer, ReportSuiteConfig
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer, ReportSuiteConfig
 
 sync = ReportSuiteSynchronizer("config_analytics_oauth.json", ReportSuiteConfig())
 sync.connect()
@@ -193,7 +198,7 @@ sync.restore_from_backup(
 .
 ├── README.md
 ├── config_analytics_oauth.json      # Your credentials (do not commit!)
-├── adobe_analytics_rs_sync_aanalytics2.py   # Main sync tool
+├── adobe_analytics_rs_sync.py       # Main sync tool
 ├── test_connection.py               # Connection tester
 └── backup_*.json                    # Auto-generated backups
 ```
