@@ -632,7 +632,7 @@ class ReportSuiteSynchronizer:
         if not source_data:
             return {"success": False, "error": "Failed to get source marketing channels"}
         
-        channels = self._extract_config_data(source_data, "channels")
+        channels = self._extract_config_data(source_data, "marketing_channels")
         if not channels:
             logger.warning("No marketing channels found in source")
             return {"success": True, "warning": "No channels to sync", "channel_count": 0}
