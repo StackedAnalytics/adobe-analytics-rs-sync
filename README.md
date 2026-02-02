@@ -197,17 +197,72 @@ The tool will automatically detect and use this file if present. Set report suit
 ### Basic Usage
 
 ```python
-from adobe_analytics_rs_sync import ReportSuiteSynchronizer
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer, SyncConfig
 
 # Simple! Everything loads from .env automatically
 sync = ReportSuiteSynchronizer()
 sync.connect()
 
 # Run a full sync (dry run first!)
+# Default: syncs only ENABLED variables (safest)
 sync.sync_all(dry_run=True)
 
 # If everything looks good, do the actual sync
 # sync.sync_all(dry_run=False)
+```
+
+### Advanced Options (New in v1.1+)
+
+#### Sync Scope Control
+
+```python
+# Default: Sync only ENABLED variables (safest)
+sync.sync_all(dry_run=True)
+
+# Include disabled variables
+sync.sync_all(dry_run=True, include_disabled=True)
+
+# Sync only CHANGED variables (most efficient - reduces API calls)
+sync.sync_all(dry_run=True, sync_changed_only=True)
+
+# Combine: Sync all changed variables (enabled + disabled)
+sync.sync_all(dry_run=True, include_disabled=True, sync_changed_only=True)
+```
+
+#### Using SyncConfig for Complex Cases
+
+```python
+from adobe_analytics_rs_sync import SyncConfig
+
+# Create reusable configuration
+prod_config = SyncConfig(
+    dry_run=False,
+    include_disabled=False,  # Only enabled (safest)
+    sync_changed_only=True   # Only what changed (efficient)
+)
+
+dev_config = SyncConfig(
+    dry_run=False,
+    include_disabled=True,   # All variables
+    sync_changed_only=False  # Everything
+)
+
+# Use config objects
+sync.sync_all(config=prod_config)
+sync.sync_evars(["dev_rsid"], config=dev_config)
+```
+
+#### Sync Specific Variable Types
+
+```python
+# Sync only eVars (with options)
+sync.sync_evars(["dev_rsid", "stg_rsid"], sync_changed_only=True)
+
+# Sync only props (include disabled)
+sync.sync_props(["dev_rsid"], include_disabled=True)
+
+# Sync only events
+sync.sync_events(["dev_rsid"], sync_changed_only=True)
 ```
 
 ### Advanced: Override Configuration
@@ -226,22 +281,38 @@ sync = ReportSuiteSynchronizer(rs_config=rs_config)
 sync.connect()
 ```
 
-### Sync Specific Configuration Types
+## What's New in v1.1+
+
+### ⚠️ Behavior Change
+
+**Old behavior (v1.0):**
+- Synced ALL variables (including disabled) by default
+- Dry run preview only showed enabled variables (misleading)
+
+**New behavior (v1.1+):**
+- Syncs only ENABLED variables by default (safer, matches dry run)
+- Dry run preview accurately shows what will be synced
+- Add `include_disabled=True` to get old behavior if needed
+
+### New Features
+
+1. **Filtered Sync** - Control whether to sync enabled-only or all variables
+2. **Change Detection** - Sync only variables that actually changed (faster, safer)
+3. **SyncConfig** - Reusable configuration objects for complex setups
+4. **Enhanced Logging** - Clear statistics on what's being synced
+
+### Migration Guide
 
 ```python
-from adobe_analytics_rs_sync import ReportSuiteSynchronizer
+# Your existing code still works, but is now SAFER
+# (syncs only enabled variables instead of all)
+sync.sync_all(dry_run=True)  # ✅ Safer default behavior
 
-sync = ReportSuiteSynchronizer()
-sync.connect()
+# To get old behavior (sync all variables):
+sync.sync_all(dry_run=True, include_disabled=True)
 
-# Sync only eVars
-sync.sync_evars(["mycompanydev", "mycompanystg"])
-
-# Sync only props
-sync.sync_props(["mycompanydev"])
-
-# Sync only events
-sync.sync_events(["mycompanystg"])
+# New efficient option (sync only what changed):
+sync.sync_all(dry_run=True, sync_changed_only=True)
 ```
 
 ### Compare Two Report Suites
