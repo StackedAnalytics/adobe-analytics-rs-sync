@@ -181,36 +181,6 @@ class ReportSuiteConfig:
 
 
 # =============================================================================
-# CONFIG FILE GENERATOR
-# =============================================================================
-
-def get_or_create_config_file(oauth_config: OAuthConfig, default_filename: str = "config_analytics_oauth.json") -> str:
-    """
-    DEPRECATED: Use OAuthConfig().get_config_file() instead.
-
-    This function is maintained for backwards compatibility.
-
-    Get config file path, creating from environment variables if needed.
-
-    Priority:
-    1. If env vars are set (AA_ORG_ID, AA_CLIENT_ID, AA_CLIENT_SECRET), use those
-    2. If AA_CONFIG_FILE env var points to existing file, use that
-    3. If default config file exists, use that
-    4. Return None if no configuration found
-
-    Returns:
-        Path to config file or None
-    """
-    import warnings
-    warnings.warn(
-        "get_or_create_config_file() is deprecated. Use OAuthConfig().get_config_file() instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return oauth_config.get_config_file(default_filename)
-
-
-# =============================================================================
 # REPORT SUITE SYNC CLASS
 # =============================================================================
 
@@ -930,14 +900,12 @@ def main():
     
     print("\n" + "=" * 60)
     print("ADOBE ANALYTICS REPORT SUITE SYNC TOOL")
-    print("Using aanalytics2 package")
     print("=" * 60)
     
     # Step 1: Load OAuth credentials (from env vars or config file)
     oauth_config = OAuthConfig()
-    config_file = get_or_create_config_file(oauth_config)
     
-    if config_file is None:
+    if oauth_config.get_config_file() is None:
         print("\n⚠️  No OAuth credentials found!")
         print("\n   Option 1: Set environment variables (recommended)")
         print("   -------------------------------------------------")
@@ -950,10 +918,6 @@ def main():
         print("     AA_STAGING_RSID=your_staging_rsid")
         print("\n   Option 2: Use a JSON config file")
         print("   ---------------------------------")
-        sample_file = "config_analytics_oauth.json"
-        create_sample_config_file(sample_file)
-        print(f"   Sample created: {sample_file}")
-        print("   Update it with your credentials and re-run.")
         return
     
     # Step 2: Initialize report suite configuration (reads from env vars)
@@ -975,26 +939,26 @@ def main():
         return
     
     # Step 3: Create synchronizer and connect
-    synchronizer = ReportSuiteSynchronizer(config_file, rs_config)
+    sync = ReportSuiteSynchronizer()
     
     print("\nConnecting to Adobe Analytics...")
-    if not synchronizer.connect():
+    if not sync.connect():
         print("❌ Connection failed. Check your credentials.")
         return
     
-    print(f"✓ Connected to: {synchronizer.company_name}")
+    print(f"✓ Connected to: {sync.company_name}")
     
     # Step 4: Create backup of dev report suite first
     print("\n" + "-" * 60)
     print("STEP 1: Creating backup of dev report suite...")
     print("-" * 60)
-    backup = synchronizer.backup_report_suite(rs_config.dev_rsid)
+    backup = sync.backup_report_suite(rs_config.dev_rsid)
     
     # Step 5: Compare production vs dev
     print("\n" + "-" * 60)
     print("STEP 2: Comparing production vs dev report suites...")
     print("-" * 60)
-    comparison = synchronizer.compare_report_suites(
+    comparison = sync.compare_report_suites(
         rs_config.production_rsid,
         rs_config.dev_rsid
     )
@@ -1004,7 +968,7 @@ def main():
     print("\n" + "-" * 60)
     print("STEP 3: Performing dry run sync...")
     print("-" * 60)
-    dry_run_results = synchronizer.sync_all(dry_run=True)
+    dry_run_results = sync.sync_all(dry_run=True)
     
     # Step 7: Prompt for actual sync (in production, you'd want proper confirmation)
     print("\n" + "-" * 60)
