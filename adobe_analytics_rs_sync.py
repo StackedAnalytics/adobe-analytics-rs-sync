@@ -29,8 +29,8 @@ Configuration:
 Documentation:
     https://github.com/pitchmuc/adobe-analytics-api-2.0
 
-Author: Digital Analytics Consultant
-Version: 2.1
+Author: Charlie Tysse <charlie@ctysse.net>
+Version: 1.1
 """
 
 import aanalytics2 as api2
@@ -113,6 +113,37 @@ class OAuthConfig:
             json.dump(self.to_config_dict(), f, indent=2)
         return filename
 
+    def get_config_file(self, default_filename: str = "config_analytics_oauth.json") -> Optional[str]:
+        """
+        Get config file path, creating from environment variables if needed.
+
+        Priority:
+        1. If env vars are set (AA_ORG_ID, etc.), create temp .aa_config_from_env.json
+        2. If AA_CONFIG_FILE env var points to existing file, use that
+        3. If default config_analytics_oauth.json exists, use that
+        4. Return None (no configuration found)
+
+        Returns:
+            Path to config file or None if no configuration found
+        """
+        config_file = os.getenv("AA_CONFIG_FILE", default_filename)
+
+        # If OAuth credentials are in environment, create temp config file
+        if self.is_configured():
+            logger.info("Using OAuth credentials from environment variables")
+            temp_config = ".aa_config_from_env.json"
+            self.save_to_file(temp_config)
+            return temp_config
+
+        # Check for existing config file
+        if Path(config_file).exists():
+            logger.info(f"Using config file: {config_file}")
+            return config_file
+
+        # No config found
+        logger.warning("No OAuth configuration found in environment or config file")
+        return None
+
 
 @dataclass
 class ReportSuiteConfig:
@@ -153,61 +184,30 @@ class ReportSuiteConfig:
 # CONFIG FILE GENERATOR
 # =============================================================================
 
-def create_sample_config_file(filename: str = "config_analytics_oauth.json"):
-    """
-    Create a sample OAuth Server-to-Server config file.
-    
-    The aanalytics2 package uses a JSON config file for authentication.
-    Starting with version 0.4.0, it defaults to OAuth Server-to-Server.
-    
-    You'll need to fill in the values from your Adobe Developer Console project.
-    """
-    config = {
-        "org_id": "DUMMY_ORG_ID@AdobeOrg",
-        "client_id": "dummy_client_id_abc123xyz789",
-        "secret": "dummy_client_secret_p@ssw0rd123!secret",
-        "scopes": "openid,AdobeID,read_organizations,additional_info.projectedProductContext,additional_info.job_function"
-    }
-    
-    with open(filename, 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    logger.info(f"Sample config file created: {filename}")
-    logger.info("Please update with your actual Adobe Developer Console credentials")
-    
-    return filename
-
-
 def get_or_create_config_file(oauth_config: OAuthConfig, default_filename: str = "config_analytics_oauth.json") -> str:
     """
+    DEPRECATED: Use OAuthConfig().get_config_file() instead.
+
+    This function is maintained for backwards compatibility.
+
     Get config file path, creating from environment variables if needed.
-    
+
     Priority:
     1. If env vars are set (AA_ORG_ID, AA_CLIENT_ID, AA_CLIENT_SECRET), use those
     2. If AA_CONFIG_FILE env var points to existing file, use that
     3. If default config file exists, use that
-    4. Create sample config file
-    
+    4. Return None if no configuration found
+
     Returns:
-        Path to config file
+        Path to config file or None
     """
-    config_file = os.getenv("AA_CONFIG_FILE", default_filename)
-    
-    # If OAuth credentials are in environment, create a temp config file
-    if oauth_config.is_configured():
-        logger.info("Using OAuth credentials from environment variables")
-        # Write to a temp file that aanalytics2 can read
-        temp_config = ".aa_config_from_env.json"
-        oauth_config.save_to_file(temp_config)
-        return temp_config
-    
-    # Otherwise, check for existing config file
-    if Path(config_file).exists():
-        logger.info(f"Using config file: {config_file}")
-        return config_file
-    
-    # No config found - return None to signal we need to create one
-    return None
+    import warnings
+    warnings.warn(
+        "get_or_create_config_file() is deprecated. Use OAuthConfig().get_config_file() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return oauth_config.get_config_file(default_filename)
 
 
 # =============================================================================
@@ -222,14 +222,29 @@ class ReportSuiteSynchronizer:
     for report suite configuration management (eVars, props, events, etc.)
     """
     
-    def __init__(self, config_file: str, rs_config: ReportSuiteConfig):
+    def __init__(
+        self,
+        config_file: Optional[str] = None,
+        rs_config: Optional[ReportSuiteConfig] = None
+    ):
         """
         Initialize the synchronizer.
-        
+
         Args:
-            config_file: Path to the aanalytics2 config JSON file
-            rs_config: Report suite configuration
+            config_file: Path to the aanalytics2 config JSON file.
+                        If None, automatically loads from environment variables or
+                        existing config_analytics_oauth.json file.
+            rs_config: Report suite configuration.
+                      If None, automatically loads from environment variables.
         """
+        # Auto-configure from environment if not provided
+        if config_file is None:
+            oauth_config = OAuthConfig()
+            config_file = oauth_config.get_config_file()
+
+        if rs_config is None:
+            rs_config = ReportSuiteConfig()
+
         self.config_file = config_file
         self.rs_config = rs_config
         self.legacy_client: Optional[api2.LegacyAnalytics] = None

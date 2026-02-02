@@ -21,20 +21,37 @@ The 2.0 API does not yet support report suite configuration management. The 1.4 
 
 ## Requirements
 
-- Python 3.6+ (tested with 3.9)
-- Adobe Developer Console project with OAuth Server-to-Server credentials
-- Analytics product profile with admin access to relevant report suites
+- [Adobe Developer Console](https://developer.adobe.com/console) project with OAuth Server-to-Server credentials
+- [Analytics product profile with admin access](https://experienceleague.adobe.com/en/docs/analytics/admin/admin-console/admin-roles-in-analytics) to relevant report suites
 
 ## Installation
 
+Clone this repo to an empty dir and `cd` into it.
 ```bash
+git clone https://github.com/StackedAnalytics/adobe-analytics-rs-sync.git
+
+cd adobe-analytics-rs-sync
+```
+
+### Using [uv](https://docs.astral.sh/uv/) (recommended)
+
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies (creates venv and installs everything)
+uv sync
+```
+
+### Using pip
+
+```bash
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
 # Install dependencies
 pip install aanalytics2 python-dotenv
-
-# Clone or download the scripts
-# - adobe_analytics_rs_sync_aanalytics2.py  (main sync tool)
-# - test_connection.py                       (connection tester)
-# - .env.example                             (environment template)
 ```
 
 ## Quick Start
@@ -72,9 +89,13 @@ AA_STAGING_RSID=mycompanystg
 
 > 💡 **That's it!** All configuration is in one place. No need for a separate JSON file.
 
-### 3. Test Your Connection
+### 3. (Optional) Test Your Connection
 
 ```bash
+# If using uv
+uv run test_connection.py
+
+# If using pip/venv
 python test_connection.py
 ```
 
@@ -110,8 +131,14 @@ CONNECTION TEST PASSED ✓
 
 ### 4. Run the Sync
 
+The tool has a **simple API** — everything loads from your `.env` file automatically:
+
 ```bash
-python adobe_analytics_rs_sync_aanalytics2.py
+# If using uv
+uv run adobe_analytics_rs_sync.py
+
+# If using pip/venv
+python adobe_analytics_rs_sync.py
 ```
 
 The script will:
@@ -163,33 +190,50 @@ If you prefer a JSON config file (or can't use `python-dotenv`), create `config_
 }
 ```
 
-Then set report suite IDs via shell environment variables.
+The tool will automatically detect and use this file if present. Set report suite IDs via shell environment variables.
 
-### Passing Values Directly in Code
+## Usage
+
+### Basic Usage
 
 ```python
-from adobe_analytics_rs_sync_aanalytics2 import ReportSuiteSynchronizer, ReportSuiteConfig, OAuthConfig
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer
 
-# Override environment variables
-oauth = OAuthConfig(
-    org_id="YOUR_ORG_ID@AdobeOrg",
-    client_id="your_client_id",
-    client_secret="your_secret"
-)
-config_file = oauth.save_to_file("my_config.json")
+# Simple! Everything loads from .env automatically
+sync = ReportSuiteSynchronizer()
+sync.connect()
 
+# Run a full sync (dry run first!)
+sync.sync_all(dry_run=True)
+
+# If everything looks good, do the actual sync
+# sync.sync_all(dry_run=False)
+```
+
+### Advanced: Override Configuration
+
+```python
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer, ReportSuiteConfig, OAuthConfig
+
+# Override specific settings while keeping env defaults for others
 rs_config = ReportSuiteConfig(
     production_rsid="mycompanyprod",
     dev_rsid="mycompanydev",
     staging_rsid="mycompanystg"
 )
 
-sync = ReportSuiteSynchronizer(config_file, rs_config)
+sync = ReportSuiteSynchronizer(rs_config=rs_config)
+sync.connect()
 ```
 
 ### Sync Specific Configuration Types
 
 ```python
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer
+
+sync = ReportSuiteSynchronizer()
+sync.connect()
+
 # Sync only eVars
 sync.sync_evars(["mycompanydev", "mycompanystg"])
 
@@ -203,6 +247,12 @@ sync.sync_events(["mycompanystg"])
 ### Compare Two Report Suites
 
 ```python
+import json
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer
+
+sync = ReportSuiteSynchronizer()
+sync.connect()
+
 comparison = sync.compare_report_suites("mycompanyprod", "mycompanydev")
 print(json.dumps(comparison, indent=2))
 ```
@@ -226,6 +276,11 @@ Output:
 ### Backup and Restore
 
 ```python
+from adobe_analytics_rs_sync import ReportSuiteSynchronizer
+
+sync = ReportSuiteSynchronizer()
+sync.connect()
+
 # Create backup
 backup = sync.backup_report_suite("mycompanydev")
 # Saves to: backup_mycompanydev_20250123_143052.json
@@ -243,11 +298,10 @@ sync.restore_from_backup(
 ```
 .
 ├── README.md
-├── .env.example                     # Environment template (commit this)
+├── .env.example                     # Environment template
 ├── .env                             # Your environment config (do NOT commit!)
-├── config_analytics_oauth.json      # Your OAuth credentials (do NOT commit!)
-├── adobe_analytics_rs_sync_aanalytics2.py   # Main sync tool
-├── test_connection.py               # Connection tester
+├── config_analytics_oauth.json      # Optional OAuth credentials file (do NOT commit!)
+├── adobe_analytics_rs_sync.py       # Main sync tool
 └── backup_*.json                    # Auto-generated backups
 ```
 
@@ -298,7 +352,8 @@ sync.restore_from_backup(
 
 ⚠️ **Never commit secrets to version control!**
 
-Add to your `.gitignore`:
+By default, the `.gitignore` includes secret files to keep you from accidentally committing them.
+
 ```gitignore
 # Credentials and secrets
 .env
