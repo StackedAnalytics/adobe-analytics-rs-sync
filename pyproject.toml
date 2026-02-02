@@ -1,7 +1,7 @@
 [project]
 name = "adobe-analytics-rs-sync"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Synchronize report suite configurations across Adobe Analytics environments"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
