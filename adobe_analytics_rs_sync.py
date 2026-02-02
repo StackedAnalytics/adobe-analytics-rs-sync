@@ -482,7 +482,7 @@ class ReportSuiteSynchronizer:
         if dry_run:
             logger.info("[DRY RUN] Would sync the following eVars:")
             for evar in enabled_evars[:10]:  # Show first 10
-                logger.info(f"  - eVar{evar.get('id')}: {evar.get('name')} "
+                logger.info(f"  - {evar.get('id')}: {evar.get('name')} "
                            f"(type: {evar.get('type')}, expiration: {evar.get('expiration_type')})")
             if len(enabled_evars) > 10:
                 logger.info(f"  ... and {len(enabled_evars) - 10} more")
@@ -523,7 +523,7 @@ class ReportSuiteSynchronizer:
         if dry_run:
             logger.info("[DRY RUN] Would sync the following props:")
             for prop in enabled_props[:10]:
-                logger.info(f"  - prop{prop.get('id')}: {prop.get('name')} "
+                logger.info(f"  - {prop.get('id')}: {prop.get('name')} "
                            f"(pathing: {prop.get('pathing_enabled')}, list: {prop.get('list_enabled')})")
             if len(enabled_props) > 10:
                 logger.info(f"  ... and {len(enabled_props) - 10} more")

@@ -16,3 +16,4 @@ backup_*.json
 # Secrets
 config_analytics_oauth.json
 .env
+.aa_config_from_env.json
