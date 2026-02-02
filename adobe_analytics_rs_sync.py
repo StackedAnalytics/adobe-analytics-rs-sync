@@ -30,7 +30,15 @@ Documentation:
     https://github.com/pitchmuc/adobe-analytics-api-2.0
 
 Author: Charlie Tysse <charlie@ctysse.net>
-Version: 1.1
+Version: 1.2
+
+Changelog:
+  v1.2 - Added sync scope control and change detection
+         - include_disabled parameter to control sync scope
+         - sync_changed_only parameter for efficient change detection
+         - SyncConfig dataclass for reusable configurations
+         - Fixed bug where dry_run showed enabled-only but synced all
+  v1.1 - Initial OAuth support and environment variable configuration
 """
 
 import aanalytics2 as api2
@@ -178,6 +186,39 @@ class ReportSuiteConfig:
     def is_using_defaults(self) -> bool:
         """Check if still using dummy default values"""
         return "dummy" in self.production_rsid.lower()
+
+
+@dataclass
+class SyncConfig:
+    """
+    Configuration options for report suite synchronization.
+
+    This dataclass groups sync parameters for cleaner API usage when
+    using multiple options together.
+
+    Attributes:
+        dry_run: If True, only preview changes without applying them
+        include_disabled: If True, sync all variables (including disabled).
+                         If False (default), only sync enabled variables.
+        sync_changed_only: If True, compare source vs target and only sync
+                          variables that have changed or are new.
+                          If False (default), sync all filtered variables.
+
+    Examples:
+        # Create a config for safe, efficient syncing
+        config = SyncConfig(
+            dry_run=True,
+            include_disabled=False,
+            sync_changed_only=True
+        )
+
+        # Reuse config across multiple operations
+        sync.sync_evars(["dev_rsid"], config=config)
+        sync.sync_props(["dev_rsid"], config=config)
+    """
+    dry_run: bool = False
+    include_disabled: bool = False
+    sync_changed_only: bool = False
 
 
 # =============================================================================
@@ -435,142 +476,555 @@ class ReportSuiteSynchronizer:
         if not api_response or len(api_response) == 0:
             return None
         return api_response[0].get(key, [])
+
+    def _compare_variable_configs(
+        self,
+        var1: Dict[str, Any],
+        var2: Dict[str, Any],
+        exclude_keys: Optional[List[str]] = None
+    ) -> bool:
+        """
+        Deep comparison of two variable configurations.
+
+        Compares all dictionary keys and values to determine if two variable
+        configurations are identical. Excludes certain keys that are expected
+        to differ between source and target (like rsid).
+
+        Args:
+            var1: First variable configuration dict
+            var2: Second variable configuration dict
+            exclude_keys: Keys to ignore in comparison (defaults to ['rsid'])
+
+        Returns:
+            True if configurations are identical, False if different
+
+        Examples:
+            # Same configuration
+            v1 = {"id": "evar1", "name": "Campaign", "enabled": True}
+            v2 = {"id": "evar1", "name": "Campaign", "enabled": True}
+            assert self._compare_variable_configs(v1, v2) == True
+
+            # Different configuration
+            v1 = {"id": "evar1", "name": "Campaign", "enabled": True}
+            v2 = {"id": "evar1", "name": "Campaign", "enabled": False}
+            assert self._compare_variable_configs(v1, v2) == False
+        """
+        if exclude_keys is None:
+            exclude_keys = ['rsid']  # rsid differs between source/target
+
+        # Get all keys from both dicts, excluding specified keys
+        keys1 = set(var1.keys()) - set(exclude_keys)
+        keys2 = set(var2.keys()) - set(exclude_keys)
+
+        # If different keys, they're different
+        if keys1 != keys2:
+            return False
+
+        # Compare all values
+        for key in keys1:
+            if var1.get(key) != var2.get(key):
+                return False
+
+        return True
+
+    def _filter_variables_to_sync(
+        self,
+        source_vars: List[Dict],
+        target_vars: Optional[List[Dict]],
+        include_disabled: bool,
+        sync_changed_only: bool,
+        var_type: str  # For logging: "eVar", "prop", "event"
+    ) -> tuple[List[Dict], Dict[str, int]]:
+        """
+        Filter variables based on enabled status and change detection.
+
+        This method applies a two-step filtering process:
+        1. Filter by enabled status (if include_disabled=False)
+        2. Filter by changes (if sync_changed_only=True)
+
+        Args:
+            source_vars: Variables from source report suite
+            target_vars: Variables from target report suite (None if not comparing)
+            include_disabled: Whether to include disabled variables
+            sync_changed_only: Whether to only sync changed variables
+            var_type: Type of variable for logging (eVar/prop/event)
+
+        Returns:
+            Tuple of (filtered_variables_to_sync, statistics_dict)
+
+            statistics_dict contains:
+            - total_source: Total variables in source
+            - enabled_source: Number of enabled variables in source
+            - disabled_source: Number of disabled variables in source
+            - to_sync: Number of variables that will be synced
+            - unchanged: Number of unchanged variables (if comparing)
+            - changed: Number of changed variables (if comparing)
+            - new: Number of new variables (if comparing)
+        """
+        stats = {
+            "total_source": len(source_vars),
+            "enabled_source": 0,
+            "disabled_source": 0,
+            "to_sync": 0,
+            "unchanged": 0,
+            "changed": 0,
+            "new": 0
+        }
+
+        # Step 1: Filter by enabled status
+        if include_disabled:
+            filtered = source_vars.copy()
+        else:
+            # Filter to only enabled (handle events which may not have 'enabled' field)
+            filtered = [v for v in source_vars if v.get("enabled", True)]
+
+        stats["enabled_source"] = len([v for v in source_vars if v.get("enabled", True)])
+        stats["disabled_source"] = stats["total_source"] - stats["enabled_source"]
+
+        # Step 2: Filter by changes (if requested)
+        if sync_changed_only and target_vars:
+            # Create lookup dict by ID
+            target_lookup = {v.get("id"): v for v in target_vars}
+
+            vars_to_sync = []
+            for source_var in filtered:
+                var_id = source_var.get("id")
+                target_var = target_lookup.get(var_id)
+
+                if target_var is None:
+                    # Variable doesn't exist in target - include it
+                    vars_to_sync.append(source_var)
+                    stats["new"] += 1
+                elif not self._compare_variable_configs(source_var, target_var):
+                    # Variable exists but has changes - include it
+                    vars_to_sync.append(source_var)
+                    stats["changed"] += 1
+                else:
+                    # Variable unchanged - skip it
+                    stats["unchanged"] += 1
+
+            filtered = vars_to_sync
+
+        stats["to_sync"] = len(filtered)
+
+        return filtered, stats
     
-    def sync_evars(self, target_rsids: List[str], dry_run: bool = False) -> Dict[str, Any]:
+    def sync_evars(
+        self,
+        target_rsids: List[str],
+        dry_run: bool = False,
+        include_disabled: bool = False,
+        sync_changed_only: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
         """
         Sync eVar configurations from production to target report suites.
-        
+
         Args:
             target_rsids: List of target report suite IDs
             dry_run: If True, only show what would be changed
-            
+            include_disabled: If True, sync all variables (including disabled).
+                            If False (default), only sync enabled variables.
+            sync_changed_only: If True, compare source vs target and only sync
+                             variables that have changed or are new.
+                             If False (default), sync all filtered variables.
+            config: Optional SyncConfig object (overrides individual parameters)
+
         Returns:
-            Dict with sync results
+            Dict with sync results including statistics
+
+        Examples:
+            # Sync only enabled variables (default, safest)
+            sync.sync_evars(["dev_rsid"])
+
+            # Sync all variables including disabled
+            sync.sync_evars(["dev_rsid"], include_disabled=True)
+
+            # Sync only changed enabled variables (efficient)
+            sync.sync_evars(["dev_rsid"], sync_changed_only=True)
+
+            # Use config object for complex cases
+            config = SyncConfig(include_disabled=True, sync_changed_only=True)
+            sync.sync_evars(["dev_rsid"], config=config)
         """
+        # If config provided, use its values (overrides individual params)
+        if config:
+            dry_run = config.dry_run
+            include_disabled = config.include_disabled
+            sync_changed_only = config.sync_changed_only
+
         logger.info("=" * 60)
         logger.info("SYNCING eVars")
         logger.info("=" * 60)
-        
+
         # Get source configuration
         source_data = self.get_evars([self.rs_config.production_rsid])
         if not source_data:
             return {"success": False, "error": "Failed to get source eVars"}
-        
-        evars = self._extract_config_data(source_data, "evars")
-        if not evars:
+
+        source_evars = self._extract_config_data(source_data, "evars")
+        if not source_evars:
             return {"success": False, "error": "No eVars found in source"}
-        
-        # Count enabled eVars
-        enabled_evars = [e for e in evars if e.get("enabled")]
-        logger.info(f"Found {len(evars)} total eVars, {len(enabled_evars)} enabled")
-        
+
+        # Get target configuration if comparing changes
+        target_evars = None
+        if sync_changed_only:
+            logger.info(f"Fetching target eVars for comparison from {target_rsids[0]}...")
+            target_data = self.get_evars([target_rsids[0]])
+            if target_data:
+                target_evars = self._extract_config_data(target_data, "evars")
+            else:
+                logger.warning("Failed to fetch target eVars; will sync all filtered variables")
+
+        # Filter variables based on parameters
+        evars_to_sync, stats = self._filter_variables_to_sync(
+            source_evars,
+            target_evars,
+            include_disabled,
+            sync_changed_only,
+            "eVar"
+        )
+
+        # Log filtering results
+        logger.info(f"Source: {stats['total_source']} total eVars "
+                   f"({stats['enabled_source']} enabled, {stats['disabled_source']} disabled)")
+        logger.info(f"Filtering: include_disabled={include_disabled}, "
+                   f"sync_changed_only={sync_changed_only}")
+
+        if sync_changed_only and target_evars:
+            logger.info(f"Change detection: {stats['new']} new, {stats['changed']} changed, "
+                       f"{stats['unchanged']} unchanged")
+
+        logger.info(f"Will sync: {stats['to_sync']} eVars")
+
         if dry_run:
             logger.info("[DRY RUN] Would sync the following eVars:")
-            for evar in enabled_evars[:10]:  # Show first 10
+            for evar in evars_to_sync[:10]:  # Show first 10
+                status = ""
+                if sync_changed_only and target_evars:
+                    target_lookup = {v.get("id"): v for v in target_evars}
+                    if evar.get("id") not in target_lookup:
+                        status = " [NEW]"
+                    elif not self._compare_variable_configs(evar, target_lookup[evar.get("id")]):
+                        status = " [CHANGED]"
+
                 logger.info(f"  - {evar.get('id')}: {evar.get('name')} "
-                           f"(type: {evar.get('type')}, expiration: {evar.get('expiration_type')})")
-            if len(enabled_evars) > 10:
-                logger.info(f"  ... and {len(enabled_evars) - 10} more")
-            return {"success": True, "dry_run": True, "evar_count": len(evars)}
-        
-        # Apply to targets
-        success = self.save_evars(target_rsids, evars)
-        
+                           f"(enabled: {evar.get('enabled')}, type: {evar.get('type')}, "
+                           f"expiration: {evar.get('expiration_type')}){status}")
+            if len(evars_to_sync) > 10:
+                logger.info(f"  ... and {len(evars_to_sync) - 10} more")
+
+            return {
+                "success": True,
+                "dry_run": True,
+                "config_type": "evars",
+                "stats": stats
+            }
+
+        # If no variables to sync, return success
+        if not evars_to_sync:
+            logger.info("No eVars to sync (all filtered out or unchanged)")
+            return {
+                "success": True,
+                "config_type": "evars",
+                "source_rsid": self.rs_config.production_rsid,
+                "target_rsids": target_rsids,
+                "stats": stats
+            }
+
+        # Apply to targets (BUG FIX: use filtered list instead of all evars)
+        success = self.save_evars(target_rsids, evars_to_sync)
+
         result = {
             "success": success,
             "config_type": "evars",
             "source_rsid": self.rs_config.production_rsid,
             "target_rsids": target_rsids,
-            "total_count": len(evars),
-            "enabled_count": len(enabled_evars)
+            "stats": stats
         }
-        
+
         self.sync_results["evars"] = result
         return result
     
-    def sync_props(self, target_rsids: List[str], dry_run: bool = False) -> Dict[str, Any]:
-        """Sync prop (traffic variable) configurations"""
+    def sync_props(
+        self,
+        target_rsids: List[str],
+        dry_run: bool = False,
+        include_disabled: bool = False,
+        sync_changed_only: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
+        """
+        Sync prop (traffic variable) configurations.
+
+        Args:
+            target_rsids: List of target report suite IDs
+            dry_run: If True, only show what would be changed
+            include_disabled: If True, sync all variables (including disabled).
+                            If False (default), only sync enabled variables.
+            sync_changed_only: If True, compare source vs target and only sync
+                             variables that have changed or are new.
+                             If False (default), sync all filtered variables.
+            config: Optional SyncConfig object (overrides individual parameters)
+
+        Returns:
+            Dict with sync results including statistics
+        """
+        # If config provided, use its values (overrides individual params)
+        if config:
+            dry_run = config.dry_run
+            include_disabled = config.include_disabled
+            sync_changed_only = config.sync_changed_only
+
         logger.info("=" * 60)
         logger.info("SYNCING Props (Traffic Variables)")
         logger.info("=" * 60)
-        
+
+        # Get source configuration
         source_data = self.get_props([self.rs_config.production_rsid])
         if not source_data:
             return {"success": False, "error": "Failed to get source props"}
-        
-        props = self._extract_config_data(source_data, "props")
-        if not props:
+
+        source_props = self._extract_config_data(source_data, "props")
+        if not source_props:
             return {"success": False, "error": "No props found in source"}
-        
-        enabled_props = [p for p in props if p.get("enabled")]
-        logger.info(f"Found {len(props)} total props, {len(enabled_props)} enabled")
-        
+
+        # Get target configuration if comparing changes
+        target_props = None
+        if sync_changed_only:
+            logger.info(f"Fetching target props for comparison from {target_rsids[0]}...")
+            target_data = self.get_props([target_rsids[0]])
+            if target_data:
+                target_props = self._extract_config_data(target_data, "props")
+            else:
+                logger.warning("Failed to fetch target props; will sync all filtered variables")
+
+        # Filter variables based on parameters
+        props_to_sync, stats = self._filter_variables_to_sync(
+            source_props,
+            target_props,
+            include_disabled,
+            sync_changed_only,
+            "prop"
+        )
+
+        # Log filtering results
+        logger.info(f"Source: {stats['total_source']} total props "
+                   f"({stats['enabled_source']} enabled, {stats['disabled_source']} disabled)")
+        logger.info(f"Filtering: include_disabled={include_disabled}, "
+                   f"sync_changed_only={sync_changed_only}")
+
+        if sync_changed_only and target_props:
+            logger.info(f"Change detection: {stats['new']} new, {stats['changed']} changed, "
+                       f"{stats['unchanged']} unchanged")
+
+        logger.info(f"Will sync: {stats['to_sync']} props")
+
         if dry_run:
             logger.info("[DRY RUN] Would sync the following props:")
-            for prop in enabled_props[:10]:
+            for prop in props_to_sync[:10]:  # Show first 10
+                status = ""
+                if sync_changed_only and target_props:
+                    target_lookup = {v.get("id"): v for v in target_props}
+                    if prop.get("id") not in target_lookup:
+                        status = " [NEW]"
+                    elif not self._compare_variable_configs(prop, target_lookup[prop.get("id")]):
+                        status = " [CHANGED]"
+
                 logger.info(f"  - {prop.get('id')}: {prop.get('name')} "
-                           f"(pathing: {prop.get('pathing_enabled')}, list: {prop.get('list_enabled')})")
-            if len(enabled_props) > 10:
-                logger.info(f"  ... and {len(enabled_props) - 10} more")
-            return {"success": True, "dry_run": True, "prop_count": len(props)}
-        
-        success = self.save_props(target_rsids, props)
-        
+                           f"(enabled: {prop.get('enabled')}, pathing: {prop.get('pathing_enabled')}, "
+                           f"list: {prop.get('list_enabled')}){status}")
+            if len(props_to_sync) > 10:
+                logger.info(f"  ... and {len(props_to_sync) - 10} more")
+
+            return {
+                "success": True,
+                "dry_run": True,
+                "config_type": "props",
+                "stats": stats
+            }
+
+        # If no variables to sync, return success
+        if not props_to_sync:
+            logger.info("No props to sync (all filtered out or unchanged)")
+            return {
+                "success": True,
+                "config_type": "props",
+                "source_rsid": self.rs_config.production_rsid,
+                "target_rsids": target_rsids,
+                "stats": stats
+            }
+
+        # Apply to targets (BUG FIX: use filtered list instead of all props)
+        success = self.save_props(target_rsids, props_to_sync)
+
         result = {
             "success": success,
             "config_type": "props",
             "source_rsid": self.rs_config.production_rsid,
             "target_rsids": target_rsids,
-            "total_count": len(props),
-            "enabled_count": len(enabled_props)
+            "stats": stats
         }
-        
+
         self.sync_results["props"] = result
         return result
     
-    def sync_events(self, target_rsids: List[str], dry_run: bool = False) -> Dict[str, Any]:
-        """Sync success event configurations"""
+    def sync_events(
+        self,
+        target_rsids: List[str],
+        dry_run: bool = False,
+        include_disabled: bool = False,
+        sync_changed_only: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
+        """
+        Sync success event configurations.
+
+        Note: Events typically don't have an 'enabled' field, so they're
+        treated as enabled by default. The include_disabled parameter is
+        included for API consistency.
+
+        Args:
+            target_rsids: List of target report suite IDs
+            dry_run: If True, only show what would be changed
+            include_disabled: If True, sync all variables (including disabled).
+                            If False (default), only sync enabled variables.
+                            Note: Events don't typically have 'enabled' field.
+            sync_changed_only: If True, compare source vs target and only sync
+                             variables that have changed or are new.
+                             If False (default), sync all filtered variables.
+            config: Optional SyncConfig object (overrides individual parameters)
+
+        Returns:
+            Dict with sync results including statistics
+        """
+        # If config provided, use its values (overrides individual params)
+        if config:
+            dry_run = config.dry_run
+            include_disabled = config.include_disabled
+            sync_changed_only = config.sync_changed_only
+
         logger.info("=" * 60)
         logger.info("SYNCING Success Events")
         logger.info("=" * 60)
-        
+
+        # Get source configuration
         source_data = self.get_events([self.rs_config.production_rsid])
         if not source_data:
             return {"success": False, "error": "Failed to get source events"}
-        
-        events = self._extract_config_data(source_data, "events")
-        if not events:
+
+        source_events = self._extract_config_data(source_data, "events")
+        if not source_events:
             return {"success": False, "error": "No events found in source"}
-        
-        # Filter to custom events (event1-event1000)
-        custom_events = [e for e in events if e.get("id", "").startswith("event")]
-        logger.info(f"Found {len(events)} total events, {len(custom_events)} custom events")
-        
+
+        # Get target configuration if comparing changes
+        target_events = None
+        if sync_changed_only:
+            logger.info(f"Fetching target events for comparison from {target_rsids[0]}...")
+            target_data = self.get_events([target_rsids[0]])
+            if target_data:
+                target_events = self._extract_config_data(target_data, "events")
+            else:
+                logger.warning("Failed to fetch target events; will sync all filtered variables")
+
+        # Filter variables based on parameters
+        # Note: Events don't have 'enabled' field, so v.get("enabled", True) treats them as enabled
+        events_to_sync, stats = self._filter_variables_to_sync(
+            source_events,
+            target_events,
+            include_disabled,
+            sync_changed_only,
+            "event"
+        )
+
+        # Count custom events for logging
+        custom_count = len([e for e in events_to_sync if e.get("id", "").startswith("event")])
+
+        # Log filtering results
+        logger.info(f"Source: {stats['total_source']} total events "
+                   f"({stats['enabled_source']} enabled, {stats['disabled_source']} disabled)")
+        logger.info(f"Filtering: include_disabled={include_disabled}, "
+                   f"sync_changed_only={sync_changed_only}")
+
+        if sync_changed_only and target_events:
+            logger.info(f"Change detection: {stats['new']} new, {stats['changed']} changed, "
+                       f"{stats['unchanged']} unchanged")
+
+        logger.info(f"Will sync: {stats['to_sync']} events ({custom_count} custom)")
+
         if dry_run:
             logger.info("[DRY RUN] Would sync the following events:")
-            for event in custom_events[:10]:
+            for event in events_to_sync[:10]:  # Show first 10
+                status = ""
+                if sync_changed_only and target_events:
+                    target_lookup = {v.get("id"): v for v in target_events}
+                    if event.get("id") not in target_lookup:
+                        status = " [NEW]"
+                    elif not self._compare_variable_configs(event, target_lookup[event.get("id")]):
+                        status = " [CHANGED]"
+
                 logger.info(f"  - {event.get('id')}: {event.get('name')} "
-                           f"(type: {event.get('type')}, serialization: {event.get('serialization')})")
-            if len(custom_events) > 10:
-                logger.info(f"  ... and {len(custom_events) - 10} more")
-            return {"success": True, "dry_run": True, "event_count": len(events)}
-        
-        success = self.save_events(target_rsids, events)
-        
+                           f"(type: {event.get('type')}, serialization: {event.get('serialization')}){status}")
+            if len(events_to_sync) > 10:
+                logger.info(f"  ... and {len(events_to_sync) - 10} more")
+
+            return {
+                "success": True,
+                "dry_run": True,
+                "config_type": "events",
+                "stats": stats
+            }
+
+        # If no variables to sync, return success
+        if not events_to_sync:
+            logger.info("No events to sync (all filtered out or unchanged)")
+            return {
+                "success": True,
+                "config_type": "events",
+                "source_rsid": self.rs_config.production_rsid,
+                "target_rsids": target_rsids,
+                "stats": stats
+            }
+
+        # Apply to targets (BUG FIX: use filtered list instead of all events)
+        success = self.save_events(target_rsids, events_to_sync)
+
         result = {
             "success": success,
             "config_type": "events",
             "source_rsid": self.rs_config.production_rsid,
             "target_rsids": target_rsids,
-            "total_count": len(events),
-            "custom_count": len(custom_events)
+            "stats": stats,
+            "custom_count": custom_count
         }
-        
+
         self.sync_results["events"] = result
         return result
     
-    def sync_internal_url_filters(self, target_rsids: List[str], dry_run: bool = False) -> Dict[str, Any]:
-        """Sync internal URL filter configurations"""
+    def sync_internal_url_filters(
+        self,
+        target_rsids: List[str],
+        dry_run: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
+        """
+        Sync internal URL filter configurations.
+
+        Note: Internal URL filters don't have enabled/disabled status,
+        so include_disabled and sync_changed_only parameters don't apply here.
+
+        Args:
+            target_rsids: List of target report suite IDs
+            dry_run: If True, only show what would be changed
+            config: Optional SyncConfig object (only dry_run is used)
+
+        Returns:
+            Dict with sync results
+        """
+        # If config provided, use dry_run value
+        if config:
+            dry_run = config.dry_run
+
         logger.info("=" * 60)
         logger.info("SYNCING Internal URL Filters")
         logger.info("=" * 60)
@@ -607,8 +1061,30 @@ class ReportSuiteSynchronizer:
         self.sync_results["internal_url_filters"] = result
         return result
     
-    def sync_marketing_channels(self, target_rsids: List[str], dry_run: bool = False) -> Dict[str, Any]:
-        """Sync marketing channel configurations"""
+    def sync_marketing_channels(
+        self,
+        target_rsids: List[str],
+        dry_run: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
+        """
+        Sync marketing channel configurations.
+
+        Note: Marketing channels have an 'enabled' field but filtering
+        logic is not currently implemented. All channels are synced.
+
+        Args:
+            target_rsids: List of target report suite IDs
+            dry_run: If True, only show what would be changed
+            config: Optional SyncConfig object (only dry_run is used)
+
+        Returns:
+            Dict with sync results
+        """
+        # If config provided, use dry_run value
+        if config:
+            dry_run = config.dry_run
+
         logger.info("=" * 60)
         logger.info("SYNCING Marketing Channels")
         logger.info("=" * 60)
@@ -643,57 +1119,101 @@ class ReportSuiteSynchronizer:
         self.sync_results["marketing_channels"] = result
         return result
     
-    def sync_all(self, target_rsids: List[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+    def sync_all(
+        self,
+        target_rsids: List[str] = None,
+        dry_run: bool = False,
+        include_disabled: bool = False,
+        sync_changed_only: bool = False,
+        config: Optional[SyncConfig] = None
+    ) -> Dict[str, Any]:
         """
         Perform a full synchronization of all configuration types.
-        
+
         Args:
             target_rsids: List of target report suite IDs (defaults to config targets)
             dry_run: If True, only show what would be changed
-            
+            include_disabled: If True, sync all variables (including disabled).
+                            If False (default), only sync enabled variables.
+            sync_changed_only: If True, compare source vs target and only sync
+                             variables that have changed or are new.
+                             If False (default), sync all filtered variables.
+            config: Optional SyncConfig object (overrides individual parameters)
+
         Returns:
-            Summary of all sync operations
+            Summary of all sync operations including statistics
+
+        Examples:
+            # Sync only enabled variables (default, safest)
+            sync.sync_all()
+
+            # Sync all variables including disabled
+            sync.sync_all(include_disabled=True)
+
+            # Sync only changed enabled variables (most efficient)
+            sync.sync_all(sync_changed_only=True)
+
+            # Use config object
+            config = SyncConfig(dry_run=True, include_disabled=True)
+            sync.sync_all(config=config)
         """
+        # If config provided, use its values (overrides individual params)
+        if config:
+            dry_run = config.dry_run
+            include_disabled = config.include_disabled
+            sync_changed_only = config.sync_changed_only
+
         if target_rsids is None:
             target_rsids = self.rs_config.target_rsids
-            
+
         logger.info("#" * 60)
         logger.info("STARTING FULL REPORT SUITE SYNC")
         logger.info(f"Source: {self.rs_config.production_rsid}")
         logger.info(f"Targets: {target_rsids}")
-        logger.info(f"Dry Run: {dry_run}")
+        logger.info(f"Options: dry_run={dry_run}, include_disabled={include_disabled}, "
+                   f"sync_changed_only={sync_changed_only}")
         logger.info("#" * 60)
-        
+
         results = {}
-        
-        # Sync each configuration type
-        results["evars"] = self.sync_evars(target_rsids, dry_run)
-        results["props"] = self.sync_props(target_rsids, dry_run)
-        results["events"] = self.sync_events(target_rsids, dry_run)
+
+        # Sync each configuration type with the same parameters
+        results["evars"] = self.sync_evars(
+            target_rsids, dry_run, include_disabled, sync_changed_only
+        )
+        results["props"] = self.sync_props(
+            target_rsids, dry_run, include_disabled, sync_changed_only
+        )
+        results["events"] = self.sync_events(
+            target_rsids, dry_run, include_disabled, sync_changed_only
+        )
         results["internal_url_filters"] = self.sync_internal_url_filters(target_rsids, dry_run)
         results["marketing_channels"] = self.sync_marketing_channels(target_rsids, dry_run)
-        
+
         # Summarize results
         successful = sum(1 for r in results.values() if r.get("success"))
         failed = len(results) - successful
-        
+
         summary = {
             "timestamp": datetime.now().isoformat(),
             "source_rsid": self.rs_config.production_rsid,
             "target_rsids": target_rsids,
-            "dry_run": dry_run,
+            "config": {
+                "dry_run": dry_run,
+                "include_disabled": include_disabled,
+                "sync_changed_only": sync_changed_only
+            },
             "total_operations": len(results),
             "successful": successful,
             "failed": failed,
             "details": results
         }
-        
+
         logger.info("#" * 60)
         logger.info("SYNC COMPLETE")
         logger.info(f"Successful: {successful}/{len(results)}")
         logger.info(f"Failed: {failed}/{len(results)}")
         logger.info("#" * 60)
-        
+
         return summary
     
     # =========================================================================
@@ -964,24 +1484,44 @@ def main():
     )
     print(json.dumps(comparison, indent=2))
     
-    # Step 6: Perform dry run
+    # Step 6: Perform dry run with default settings (enabled-only)
     print("\n" + "-" * 60)
-    print("STEP 3: Performing dry run sync...")
+    print("STEP 3: Performing dry run sync (ENABLED variables only)...")
     print("-" * 60)
     dry_run_results = sync.sync_all(dry_run=True)
-    
+
+    # Step 6b: Show example of changed-only sync
+    print("\n" + "-" * 60)
+    print("STEP 3b: Preview of changed-only sync (more efficient)...")
+    print("-" * 60)
+    print("This would only sync variables that changed or are new:")
+    print("  sync.sync_all(dry_run=True, sync_changed_only=True)")
+    # Uncomment to try:
+    # changed_only_results = sync.sync_all(dry_run=True, sync_changed_only=True)
+
     # Step 7: Prompt for actual sync (in production, you'd want proper confirmation)
     print("\n" + "-" * 60)
     print("STEP 4: Ready for actual sync")
     print("-" * 60)
-    print("\nTo perform the actual sync, uncomment the following line:")
-    print("  # sync_results = synchronizer.sync_all(dry_run=False)")
-    
-    # Uncomment to perform actual sync:
+    print("\nOptions for actual sync:")
+    print("  # Default (enabled-only, safest):")
+    print("  sync_results = sync.sync_all()")
+    print("")
+    print("  # Include disabled variables:")
+    print("  sync_results = sync.sync_all(include_disabled=True)")
+    print("")
+    print("  # Only sync what changed (efficient):")
+    print("  sync_results = sync.sync_all(sync_changed_only=True)")
+    print("")
+    print("  # Using SyncConfig:")
+    print("  config = SyncConfig(include_disabled=False, sync_changed_only=True)")
+    print("  sync_results = sync.sync_all(config=config)")
+
+    # Uncomment to perform actual sync with your preferred options:
     # print("\nPerforming actual sync...")
-    # sync_results = synchronizer.sync_all(dry_run=False)
+    # sync_results = sync.sync_all()  # Default: enabled-only
     # print(json.dumps(sync_results, indent=2))
-    
+
     print("\n" + "=" * 60)
     print("WORKFLOW COMPLETE")
     print("=" * 60)
@@ -989,8 +1529,12 @@ def main():
     print("  1. ✓ Connected to Adobe Analytics")
     print("  2. ✓ Created backup of dev report suite")
     print("  3. ✓ Compared production vs dev configurations")
-    print("  4. ✓ Performed dry run sync")
-    print("  5. ⏸ Actual sync ready (uncomment to execute)")
+    print("  4. ✓ Performed dry run sync (enabled variables only)")
+    print("  5. ⏸ Actual sync ready (uncomment with your preferred options)")
+    print("\nNew in v1.1+:")
+    print("  • Default syncs only ENABLED variables (safer)")
+    print("  • Use include_disabled=True to sync all variables")
+    print("  • Use sync_changed_only=True to sync only changes (efficient)")
     
     # Clean up temp config file if we created one
     temp_config = ".aa_config_from_env.json"
